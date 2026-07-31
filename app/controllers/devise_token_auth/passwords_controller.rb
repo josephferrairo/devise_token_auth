@@ -49,14 +49,20 @@ module DeviseTokenAuth
         yield @resource if block_given?
 
         if require_client_password_reset_token?
-          redirect_to DeviseTokenAuth::Url.generate(@redirect_url, reset_password_token: resource_params[:reset_password_token])
+          redirect_to DeviseTokenAuth::Url.generate(@redirect_url, reset_password_token: resource_params[:reset_password_token]),
+          redirect_options
         else
-          redirect_header_options = { reset_password: true }
+          if DeviseTokenAuth.cookie_enabled
+            set_token_in_cookie(@resource, token)
+          end
+
+          redirect_header_options = { reset_password: true, reset_password_token: resource_params[:reset_password_token] }
           redirect_headers = build_redirect_headers(token.token,
                                                     token.client,
                                                     redirect_header_options)
           redirect_to(@resource.build_auth_url(@redirect_url,
-                                               redirect_headers))
+                                               redirect_headers),
+                                               redirect_options)
         end
       else
         render_edit_error
@@ -67,7 +73,7 @@ module DeviseTokenAuth
       # make sure user is authorized
       if require_client_password_reset_token? && resource_params[:reset_password_token]
         @resource = resource_class.with_reset_password_token(resource_params[:reset_password_token])
-        return render_update_error_unauthorized unless @resource
+        return render_update_error_unauthorized unless @resource && @resource.reset_password_period_valid?
 
         @token = @resource.create_token
       else
@@ -182,7 +188,7 @@ module DeviseTokenAuth
 
     def render_not_found_error
       if Devise.paranoid
-        render_error(404, I18n.t('devise_token_auth.passwords.sended_paranoid'))
+        render_create_success
       else
         render_error(404, I18n.t('devise_token_auth.passwords.user_not_found', email: @email))
       end

@@ -76,6 +76,28 @@ class UserTest < ActiveSupport::TestCase
       end
     end
 
+    describe 'previous token' do
+      before do
+        @resource = create(:user, :confirmed)
+
+        @auth_headers1 = @resource.create_new_auth_token
+      end
+
+      test 'should properly indicate whether previous token is current' do
+        assert @resource.token_is_current?(@auth_headers1['access-token'], @auth_headers1['client'])
+        # create another token, emulating a new request
+        @auth_headers2 = @resource.create_new_auth_token
+
+        # should work for previous token
+        assert @resource.token_is_current?(@auth_headers1['access-token'], @auth_headers1['client'])
+        # should work for latest token as well
+        assert @resource.token_is_current?(@auth_headers2['access-token'], @auth_headers2['client'])
+
+        # after using latest token, previous token should not work
+        assert @resource.token_is_current?(@auth_headers1['access-token'], @auth_headers1['client'])
+      end
+    end
+
     describe 'expired tokens are destroyed on save' do
       before do
         @resource = create(:user, :confirmed)
@@ -103,6 +125,127 @@ class UserTest < ActiveSupport::TestCase
         @resource.tokens = nil
         assert @resource.save
       end
+    end
+  end
+
+  describe 'clean_old_tokens' do
+    before do
+      @resource = create(:user, :confirmed)
+      @token_lifespan = DeviseTokenAuth.token_lifespan
+      @max_client_count = DeviseTokenAuth.max_number_of_devices
+      DeviseTokenAuth.max_number_of_devices = 2
+      DeviseTokenAuth.token_lifespan = 1.week
+    end
+
+    after do
+      DeviseTokenAuth.token_lifespan = @token_lifespan
+      DeviseTokenAuth.max_number_of_devices = @max_client_count
+    end
+
+    test 'removes tokens with expiry beyond the maximum lifespan' do
+      # Create tokens with different expiry times
+      current_time = Time.now.to_i
+
+      max_lifespan = current_time + DeviseTokenAuth.token_lifespan.to_i
+
+      # Valid token within lifespan
+      @resource.tokens['valid_client'] = {
+        'token' => 'valid_token',
+        'expiry' => current_time + 1.day.to_i
+      }
+
+      # Token exactly at max lifespan (should be kept)
+      @resource.tokens['edge_client'] = {
+        'token' => 'edge_token',
+        'expiry' => max_lifespan
+      }
+
+      # Token beyond max lifespan (should be removed)
+      @resource.tokens['expired_client'] = {
+        'token' => 'expired_token',
+        'expiry' => max_lifespan + 1.day.to_i
+      }
+
+      # Call the method under test
+      @resource.send(:clean_old_tokens)
+
+      # Assert that tokens beyond lifespan were removed
+      assert @resource.tokens.key?('valid_client'), 'Valid token should be kept'
+      assert @resource.tokens.key?('edge_client'), 'Edge case token at max lifespan should be kept'
+      refute @resource.tokens.key?('expired_client'), 'Token beyond max lifespan should be removed'
+    end
+
+    test 'handles token lifespan reduction when creating token' do
+      # Setup: Create the maximum allowed number of tokens with a longer lifespan
+      DeviseTokenAuth.token_lifespan = 2.weeks
+      DeviseTokenAuth.max_number_of_devices = 3
+
+      # Create tokens at different times but all within the initial long lifespan
+      @resource.tokens = {}
+      @resource.tokens['client_1'] = {
+        'token' => 'token_1',
+        'expiry' => Time.now.to_i + 12.days.to_i
+      }
+
+      @resource.tokens['client_2'] = {
+        'token' => 'token_2',
+        'expiry' => Time.now.to_i + 10.days.to_i
+      }
+
+      @resource.tokens['client_3'] = {
+        'token' => 'token_3',
+        'expiry' => Time.now.to_i + 5.days.to_i
+      }
+
+      # We've reached the maximum number of devices/tokens
+      assert_equal 3, @resource.tokens.length
+
+      # Now reduce token lifespan - simulating a config change
+      DeviseTokenAuth.token_lifespan = 1.week
+
+      # Create a new token which should trigger clean_old_tokens
+      new_auth_headers = @resource.create_new_auth_token
+      new_client = new_auth_headers['client']
+
+      # The new token should exist
+      assert @resource.tokens.key?(new_client), 'New token should exist'
+
+      # Tokens exceeding the new reduced lifespan should be removed
+      refute @resource.tokens.key?('client_1'), 'Token with expiry > new lifespan should be removed'
+      refute @resource.tokens.key?('client_2'), 'Token with expiry > new lifespan should be removed'
+
+      # Token within new lifespan should be kept
+      assert @resource.tokens.key?('client_3'), 'Token within new reduced lifespan should be kept'
+
+      # We should have exactly 2 tokens: the new one and client_3
+      assert_equal 2, @resource.tokens.length
+    end
+
+    # Regression: with a calendar ActiveSupport::Duration lifespan, the token
+    #   expiry is advanced by calendar (Time.zone.now + 2.months) while the old
+    #   eager purge compared against an average-seconds threshold
+    #   (token_lifespan.to_i). The freshly minted token's expiry sat just past
+    #   that threshold and was silently dropped, leaving a 200 response whose
+    #   advertised access-token no longer existed in user.tokens.
+    test 'keeps the freshly created token at the device cap with a calendar lifespan' do
+      DeviseTokenAuth.max_number_of_devices = 2
+      DeviseTokenAuth.token_lifespan = 2.months
+
+      # Fill the cap with tokens created a few hours ago (calendar expiry).
+      old_time = 4.hours.ago
+      @resource.tokens = {}
+      %w[client_1 client_2].each do |client|
+        @resource.tokens[client] = {
+          'token' => 'x',
+          'expiry' => (old_time + DeviseTokenAuth.token_lifespan).to_i
+        }
+      end
+
+      tok = @resource.create_token
+
+      assert @resource.tokens.key?(tok.client),
+             'Freshly created token must survive clean_old_tokens'
+      assert_equal DeviseTokenAuth.max_number_of_devices, @resource.tokens.length
     end
   end
 end

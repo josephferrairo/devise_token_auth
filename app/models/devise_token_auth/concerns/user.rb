@@ -41,8 +41,7 @@ module DeviseTokenAuth::Concerns::User
 
     # don't use default devise email validation
     def email_required?; false; end
-    def email_changed?; false; end
-    def will_save_change_to_email?; false; end
+    def devise_will_save_change_to_email?; false; end
 
     if DeviseTokenAuth.send_confirmation_email && devise_modules.include?(:confirmable)
       include DeviseTokenAuth::Concerns::ConfirmableSupport
@@ -120,6 +119,7 @@ module DeviseTokenAuth::Concerns::User
     # ghetto HashWithIndifferentAccess
     expiry     = tokens[client]['expiry'] || tokens[client][:expiry]
     token_hash = tokens[client]['token'] || tokens[client][:token]
+    previous_token_hash = tokens[client]['previous_token'] || tokens[client][:previous_token]
 
     return true if (
       # ensure that expiry and token are set
@@ -129,11 +129,24 @@ module DeviseTokenAuth::Concerns::User
       DateTime.strptime(expiry.to_s, '%s') > Time.zone.now &&
 
       # ensure that the token is valid
-      DeviseTokenAuth::Concerns::User.tokens_match?(token_hash, token)
+      (
+        # check if the latest token matches
+        does_token_match?(token_hash, token) ||
+
+        # check if the previous token matches
+        does_token_match?(previous_token_hash, token)
+      )
     )
   end
 
-  # allow batch requests to use the previous token
+  # check if the hash of received token matches the stored token
+  def does_token_match?(token_hash, token)
+    return false if token_hash.nil?
+
+    DeviseTokenAuth::Concerns::User.tokens_match?(token_hash, token)
+  end
+
+  # allow batch requests to use the last token
   def token_can_be_reused?(token, client)
     # ghetto HashWithIndifferentAccess
     updated_at = tokens[client]['updated_at'] || tokens[client][:updated_at]
@@ -143,7 +156,7 @@ module DeviseTokenAuth::Concerns::User
       # ensure that the last token and its creation time exist
       updated_at && last_token_hash &&
 
-      # ensure that previous token falls within the batch buffer throttle time of the last request
+      # ensure that last token falls within the batch buffer throttle time of the last request
       updated_at.to_time > Time.zone.now - DeviseTokenAuth.batch_request_buffer_throttle &&
 
       # ensure that the token is valid
@@ -157,29 +170,38 @@ module DeviseTokenAuth::Concerns::User
 
     token = create_token(
       client: client,
-      last_token: tokens.fetch(client, {})['token'],
+      previous_token: tokens.fetch(client, {})['token'],
+      last_token: tokens.fetch(client, {})['previous_token'],
       updated_at: now
     )
 
-    update_auth_header(token.token, token.client)
+    update_auth_headers(token.token, token.client)
   end
 
-  def build_auth_header(token, client = 'default')
+  def build_auth_headers(token, client = 'default')
     # client may use expiry to prevent validation request if expired
     # must be cast as string or headers will break
     expiry = tokens[client]['expiry'] || tokens[client][:expiry]
-
-    {
+    headers = {
       DeviseTokenAuth.headers_names[:"access-token"] => token,
       DeviseTokenAuth.headers_names[:"token-type"]   => 'Bearer',
       DeviseTokenAuth.headers_names[:"client"]       => client,
       DeviseTokenAuth.headers_names[:"expiry"]       => expiry.to_s,
       DeviseTokenAuth.headers_names[:"uid"]          => uid
     }
+    headers.merge(build_bearer_token(headers))
   end
 
-  def update_auth_header(token, client = 'default')
-    headers = build_auth_header(token, client)
+  def build_bearer_token(auth)
+    return {} if DeviseTokenAuth.cookie_enabled # There is no need for the bearer token if it is using cookies
+
+    encoded_token = Base64.strict_encode64(auth.to_json)
+    bearer_token = "Bearer #{encoded_token}"
+    { DeviseTokenAuth.headers_names[:"authorization"] => bearer_token }
+  end
+
+  def update_auth_headers(token, client = 'default')
+    headers = build_auth_headers(token, client)
     clean_old_tokens
     save!
 
@@ -195,7 +217,7 @@ module DeviseTokenAuth::Concerns::User
 
   def extend_batch_buffer(token, client)
     tokens[client]['updated_at'] = Time.zone.now
-    update_auth_header(token, client)
+    update_auth_headers(token, client)
   end
 
   def confirmed?
@@ -236,17 +258,30 @@ module DeviseTokenAuth::Concerns::User
   end
 
   def clean_old_tokens
-    if tokens.present? && max_client_tokens_exceeded?
-      # Using Enumerable#sort_by on a Hash will typecast it into an associative
-      #   Array (i.e. an Array of key-value Array pairs). However, since Hashes
-      #   have an internal order in Ruby 1.9+, the resulting sorted associative
-      #   Array can be converted back into a Hash, while maintaining the sorted
-      #   order.
-      self.tokens = tokens.sort_by { |_cid, v| v[:expiry] || v['expiry'] }.to_h
+    return if tokens.blank? || !max_client_tokens_exceeded?
 
-      # Since the tokens are sorted by expiry, shift the oldest client token
-      #   off the Hash until it no longer exceeds the maximum number of clients
-      tokens.shift while max_client_tokens_exceeded?
+    # First, remove any tokens with expiry greater than current max allowed lifespan
+    #   this handles the case where token lifespan was reduced and old tokens exist.
+    #   The threshold MUST be computed the same way TokenFactory.expiry writes
+    #   expiries — calendar advance (Time.zone.now + lifespan) — otherwise a
+    #   calendar Duration (e.g. 2.months) and its average-seconds form
+    #   (token_lifespan.to_i) disagree by hours, and the freshly minted token
+    #   gets purged out from under the response.
+    max_lifespan_expiry = (Time.zone.now + DeviseTokenAuth.token_lifespan).to_i
+    tokens_to_keep = tokens.select do |_cid, v|
+      expiry = (v[:expiry] || v['expiry']).to_i
+      expiry <= max_lifespan_expiry
     end
+
+    # Using Enumerable#sort_by on a Hash will typecast it into an associative
+    #   Array (i.e. an Array of key-value Array pairs). However, since Hashes
+    #   have an internal order in Ruby 1.9+, the resulting sorted associative
+    #   Array can be converted back into a Hash, while maintaining the sorted
+    #   order.
+    self.tokens = tokens_to_keep.sort_by { |_cid, v| v[:expiry] || v['expiry'] }.to_h
+
+    # Since the tokens are sorted by expiry, shift the oldest client token
+    #   off the Hash until it no longer exceeds the maximum number of clients
+    tokens.shift while max_client_tokens_exceeded?
   end
 end

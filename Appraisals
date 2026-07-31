@@ -33,12 +33,31 @@ end
   { name: '5-2', ruby: '2.5.5', rails: '5.2', mongoid: '6.4' },
   { name: '5-2', ruby: '2.5.5', rails: '5.2', mongoid: '7.0' },
   { name: '5-2', ruby: '2.6.2', rails: '5.2', mongoid: '7.0' },
-  { name: '6-0', ruby: '2.7.0', rails: '6.0', mongoid: '7.0' }
+  { name: '6-0', ruby: '2.7.0', rails: '6.0', mongoid: '7.0' },
+  { name: '6-0', ruby: '3.1.2', rails: '6.0', mongoid: '7.0' },
+  { name: '7-0', ruby: '3.1.2', rails: '7.0', mongoid: '7.0' }
 ].each do |set|
   appraise "rails-#{set[:name]}-mongoid-#{set[:mongoid][0]}" do
     gem 'rails', "~> #{set[:rails]}"
 
     gem 'mongoid', "~> #{set[:mongoid]}"
     gem 'mongoid-locker', '~> 1.0'
+  end
+end
+
+[
+  { name: '8-0', version: '8.0' },
+  { name: '8-1', version: '8.1' }
+].each do |rails|
+  appraise "rails-#{rails[:name]}" do
+    gem 'rails', "~> #{rails[:version]}.0"
+
+    gem 'sqlite3', '~> 2.1'
+    gem 'mysql2'
+    gem 'pg'
+
+    group :development, :test do
+      gem 'minitest-rails', "~> #{rails[:version]}"
+    end
   end
 end

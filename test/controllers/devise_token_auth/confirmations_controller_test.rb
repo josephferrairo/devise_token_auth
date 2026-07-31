@@ -11,7 +11,7 @@ require 'test_helper'
 class DeviseTokenAuth::ConfirmationsControllerTest < ActionController::TestCase
   describe DeviseTokenAuth::ConfirmationsController do
     def token_and_client_config_from(body)
-      token         = body.match(/confirmation_token=([^&]*)&/)[1]
+      token         = body.match(/confirmation_token=([^&]*)[&"]/)[1]
       client_config = body.match(/config=([^&]*)&/)[1]
       [token, client_config]
     end
@@ -62,8 +62,8 @@ class DeviseTokenAuth::ConfirmationsControllerTest < ActionController::TestCase
           end
 
           test 'redirect url includes token params' do
-            assert @token_params.all? { |param| response.body.include?(param) }
-            assert response.body.include?('account_confirmation_success')
+            assert @token_params.all? { |param| response.location.include?(param) }
+            assert response.location.include?('account_confirmation_success')
           end
         end
 
@@ -86,8 +86,8 @@ class DeviseTokenAuth::ConfirmationsControllerTest < ActionController::TestCase
           end
 
           test 'redirect url does not include token params' do
-            refute @token_params.any? { |param| response.body.include?(param) }
-            assert response.body.include?('account_confirmation_success')
+            refute @token_params.any? { |param| response.location.include?(param) }
+            assert response.location.include?('account_confirmation_success')
           end
         end
 
@@ -171,21 +171,30 @@ class DeviseTokenAuth::ConfirmationsControllerTest < ActionController::TestCase
             test 'response should contain message' do
               assert_equal @data['message'], I18n.t('devise_token_auth.confirmations.sended_paranoid', email: @resource.email)
             end
+
+            test 'response should return success status' do
+              assert_equal 200, response.status
+            end
           end
 
           describe 'on failure' do
             before do
               swap Devise, paranoid: true do
+                @email = 'chester@cheet.ah'
                 post :create,
-                     params: { email: 'chester@cheet.ah',
+                     params: { email: @email,
                                redirect_url: @redirect_url },
                      xhr: true
                 @data = JSON.parse(response.body)
               end
             end
 
-            test 'response should contain errors' do
-              assert_equal @data['errors'], [I18n.t('devise_token_auth.confirmations.sended_paranoid')]
+            test 'response should not contain errors' do
+              assert_equal @data['message'], I18n.t('devise_token_auth.confirmations.sended_paranoid', email: @email)
+            end
+
+            test 'response should return success status' do
+              assert_equal 200, response.status
             end
           end
         end
@@ -193,9 +202,12 @@ class DeviseTokenAuth::ConfirmationsControllerTest < ActionController::TestCase
 
       describe 'failure' do
         test 'user should not be confirmed' do
-          assert_raises(ActionController::RoutingError) do
-            get :show, params: { confirmation_token: 'bogus' }
-          end
+          get :show,
+              params: { confirmation_token: 'bogus',
+                        redirect_url: @redirect_url }
+
+          assert_redirected_to(/^#{@redirect_url}/)
+
           @resource = assigns(:resource)
           refute @resource.confirmed?
         end

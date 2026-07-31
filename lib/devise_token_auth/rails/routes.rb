@@ -65,17 +65,31 @@ module ActionDispatch::Routing
 
           # omniauth routes. only define if omniauth is installed and not skipped.
           if defined?(::OmniAuth) && !opts[:skip].include?(:omniauth_callbacks)
-            match "#{full_path}/failure",             controller: omniauth_ctrl, action: 'omniauth_failure', via: [:get]
-            match "#{full_path}/:provider/callback",  controller: omniauth_ctrl, action: 'omniauth_success', via: [:get]
+            match "#{full_path}/failure",             controller: omniauth_ctrl, action: 'omniauth_failure', via: [:get, :post]
+            match "#{full_path}/:provider/callback",  controller: omniauth_ctrl, action: 'omniauth_success', via: [:get, :post]
 
             match "#{DeviseTokenAuth.omniauth_prefix}/:provider/callback", controller: omniauth_ctrl, action: 'redirect_callbacks', via: [:get, :post]
             match "#{DeviseTokenAuth.omniauth_prefix}/failure", controller: omniauth_ctrl, action: 'omniauth_failure', via: [:get, :post]
 
             # preserve the resource class thru oauth authentication by setting name of
             # resource as "resource_class" param
-            match "#{full_path}/:provider", to: redirect{ |params, request|
+            match "#{full_path}/:provider", to: redirect(status: 307) { |params, request|
               # get the current querystring
-              qs = CGI::parse(request.env['QUERY_STRING'])
+              # TODO: deprecate in favor of using params
+              # `CGI.parse` is unavailable as of the cgi gem shipped with Ruby 3.5
+              # (pulled in by Rails 8.1). `Rack::Utils.parse_query` returns a bare
+              # value for single occurrences, so normalize to arrays to keep the
+              # shape `CGI.parse` returned.
+              # As of Rails 7.1 the request body may already have been read when
+              # this runs, in which case `read` returns "" and every param is
+              # silently dropped. Rewind first so POSTed params survive.
+              query_string = if request.env['QUERY_STRING'].empty?
+                               request.body.rewind if request.body.respond_to?(:rewind)
+                               request.body.read
+                             else
+                               request.env['QUERY_STRING']
+                             end
+              qs = Rack::Utils.parse_query(query_string).transform_values { |v| Array(v) }
 
               # append name of current resource
               qs['resource_class'] = [resource]
@@ -99,7 +113,7 @@ module ActionDispatch::Routing
 
               # re-construct the path for omniauth
               "#{::OmniAuth.config.path_prefix}/#{params[:provider]}?#{redirect_params.to_param}"
-            }, via: [:get]
+            }, via: [:get, :post]
           end
         end
       end
